@@ -1,6 +1,6 @@
 # encredible
 
-Standalone tool to show, edit, and merge Rails encrypted credentials without booting Rails.
+Incredibly simple Rails credentials management and conflict resolution.
 
 Uses Ruby stdlib (`openssl`, `base64`) — no gems required.
 

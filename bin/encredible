@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# encredible — Standalone Rails credentials tool
+# encredible — Incredibly simple Rails credentials management and conflict resolution
 #
 # Show, edit, and merge Rails encrypted credentials without booting Rails.
 # Uses Ruby stdlib (openssl, base64) — no gems required.
@@ -48,7 +48,7 @@ TEXTCONV_FILE=""
 # ---------------------------------------------------------------------------
 usage() {
   cat <<'HELP'
-encredible — Standalone Rails credentials tool (no Rails boot)
+encredible — Incredibly simple Rails credentials management and conflict resolution
 
 USAGE:
   encredible -s [-E ENV]
