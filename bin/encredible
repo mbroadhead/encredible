@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.8"
+VERSION="0.1.9"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -514,6 +514,12 @@ cmd_textconv() {
 
   # /dev/null or empty file (e.g. the "before" side of a newly added file) — nothing to decrypt
   if [[ "$file" == "/dev/null" ]] || [[ ! -s "$file" ]]; then
+    exit 0
+  fi
+
+  # File with merge conflict markers can't be decrypted
+  if grep -q '^<<<<<<<' "$file" 2>/dev/null; then
+    echo "# encredible: file contains merge conflict markers — use 'encredible --resolve' to resolve"
     exit 0
   fi
 
