@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.5"
+VERSION="0.1.6"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -457,34 +457,86 @@ cmd_mergetool() {
 }
 
 # ---------------------------------------------------------------------------
+# decrypt_with_any_key: try decrypting with every available key
+#   Used when the file path is unrecognizable (e.g. git temp files for blobs)
+#   Outputs plaintext to stdout on success, returns 1 on failure
+# ---------------------------------------------------------------------------
+decrypt_with_any_key() {
+  local enc_file="$1"
+  local saved_content_path="${CONTENT_PATH:-}"
+  local saved_key_path="${KEY_PATH:-}"
+
+  CONTENT_PATH="$enc_file"
+
+  # If RAILS_MASTER_KEY is set, ruby_decrypt always uses it — just try once
+  if [[ -n "${RAILS_MASTER_KEY:-}" ]]; then
+    if run_ruby "$(ruby_decrypt)" 2>/dev/null; then
+      CONTENT_PATH="$saved_content_path"
+      KEY_PATH="$saved_key_path"
+      return 0
+    fi
+    CONTENT_PATH="$saved_content_path"
+    KEY_PATH="$saved_key_path"
+    return 1
+  fi
+
+  # Try each available key file
+  local key_paths=()
+  [[ -f "$REPO_ROOT/config/master.key" ]] && key_paths+=("config/master.key")
+  for kf in "$REPO_ROOT"/config/credentials/*.key; do
+    [[ -f "$kf" ]] && key_paths+=("${kf#"$REPO_ROOT/"}")
+  done
+
+  for kp in "${key_paths[@]}"; do
+    KEY_PATH="$kp"
+    if run_ruby "$(ruby_decrypt)" 2>/dev/null; then
+      CONTENT_PATH="$saved_content_path"
+      KEY_PATH="$saved_key_path"
+      return 0
+    fi
+  done
+
+  CONTENT_PATH="$saved_content_path"
+  KEY_PATH="$saved_key_path"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # cmd_textconv: decrypt a single file to stdout (used by git textconv)
 #   Git calls: <command> <file>
 #   For working-tree files the path is recognizable (config/credentials/...)
-#   For historical blobs git passes a temp file — fall back to default key
+#   For historical blobs git passes a temp file — try all available keys
 # ---------------------------------------------------------------------------
 cmd_textconv() {
   local file="$TEXTCONV_FILE"
 
-  # Try to detect environment from the file path; fall back to defaults
-  # Suppress stdout from resolve_paths_from_file so it doesn't pollute textconv output
-  if [[ "$file" == *credentials*.yml.enc ]]; then
-    resolve_paths_from_file "$file" >/dev/null 2>/dev/null || resolve_paths
-  else
-    resolve_paths
+  # /dev/null or empty file (e.g. the "before" side of a newly added file) — nothing to decrypt
+  if [[ "$file" == "/dev/null" ]] || [[ ! -s "$file" ]]; then
+    exit 0
   fi
-  validate_key
 
-  local saved_content_path="$CONTENT_PATH"
-  CONTENT_PATH="$file"
-  # Output error to stdout so git textconv includes it in the diff
-  # Include blob hash so different undecryptable versions produce unique output
-  if ! run_ruby "$(ruby_decrypt)" 2>"$WORK_DIR/textconv_err.log"; then
-    local blob_hash
-    blob_hash="$(git hash-object "$file" 2>/dev/null || echo "unknown")"
-    echo "# encredible: decryption failed for blob $blob_hash (key source: $(key_source))"
-    cat "$WORK_DIR/textconv_err.log"
+  if [[ "$file" == *credentials*.yml.enc ]]; then
+    # Recognizable path — use path-based key detection
+    resolve_paths_from_file "$file" >/dev/null 2>/dev/null || resolve_paths
+    validate_key
+
+    local saved_content_path="$CONTENT_PATH"
+    CONTENT_PATH="$file"
+    if ! run_ruby "$(ruby_decrypt)" 2>"$WORK_DIR/textconv_err.log"; then
+      local blob_hash
+      blob_hash="$(git hash-object "$file" 2>/dev/null || echo "unknown")"
+      echo "# encredible: decryption failed for blob $blob_hash (key source: $(key_source))"
+      cat "$WORK_DIR/textconv_err.log"
+    fi
+    CONTENT_PATH="$saved_content_path"
+  else
+    # Temp file from git (historical blob) — try all available keys
+    if ! decrypt_with_any_key "$file"; then
+      local blob_hash
+      blob_hash="$(git hash-object "$file" 2>/dev/null || echo "unknown")"
+      echo "# encredible: decryption failed for blob $blob_hash (no matching key found)"
+    fi
   fi
-  CONTENT_PATH="$saved_content_path"
 }
 
 # ---------------------------------------------------------------------------
@@ -511,8 +563,18 @@ cmd_difftool() {
   local tmp_local="$WORK_DIR/old.yml"
   local tmp_remote="$WORK_DIR/new.yml"
 
-  decrypt_blob_to_file "$dt_local" "$tmp_local"
-  decrypt_blob_to_file "$dt_remote" "$tmp_remote"
+  # Handle /dev/null or empty files (new file added or file deleted)
+  if [[ "$dt_local" == "/dev/null" ]] || [[ ! -s "$dt_local" ]]; then
+    : > "$tmp_local"
+  else
+    decrypt_blob_to_file "$dt_local" "$tmp_local"
+  fi
+
+  if [[ "$dt_remote" == "/dev/null" ]] || [[ ! -s "$dt_remote" ]]; then
+    : > "$tmp_remote"
+  else
+    decrypt_blob_to_file "$dt_remote" "$tmp_remote"
+  fi
 
   # Use diff with color; exit 0 even if files differ (exit 1 from diff is normal)
   diff -u --label "a/$CONTENT_PATH" --label "b/$CONTENT_PATH" \
