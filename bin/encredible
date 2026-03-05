@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -466,7 +466,9 @@ cmd_textconv() {
 
   local saved_content_path="$CONTENT_PATH"
   CONTENT_PATH="$file"
-  run_ruby "$(ruby_decrypt)" || true
+  if ! run_ruby "$(ruby_decrypt)" 2>"$WORK_DIR/textconv_err.log"; then
+    cat "$WORK_DIR/textconv_err.log"
+  fi
   CONTENT_PATH="$saved_content_path"
 }
 
