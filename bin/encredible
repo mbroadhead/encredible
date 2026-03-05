@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.7"
+VERSION="0.1.8"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -536,7 +536,11 @@ cmd_textconv() {
     if ! decrypt_with_any_key "$file"; then
       local blob_hash
       blob_hash="$(git hash-object "$file" 2>/dev/null || echo "unknown")"
-      echo "# encredible: decryption failed for blob $blob_hash (no matching key found)"
+      if [[ -n "${RAILS_MASTER_KEY:-}" ]]; then
+        echo "# encredible: decryption failed for blob $blob_hash (tried RAILS_MASTER_KEY env var)"
+      else
+        echo "# encredible: decryption failed for blob $blob_hash (no matching key found)"
+      fi
     fi
   fi
 }
