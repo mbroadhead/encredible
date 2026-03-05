@@ -7,13 +7,13 @@ Uses Ruby stdlib (`openssl`, `base64`) — no gems required.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/pmtbox/encredible/main/bin/encredible -o /usr/local/bin/encredible && chmod +x /usr/local/bin/encredible
+curl -fsSL https://raw.githubusercontent.com/mbroadhead/encredible/main/bin/encredible -o /usr/local/bin/encredible && chmod +x /usr/local/bin/encredible
 ```
 
 Or install to `~/bin/`:
 
 ```sh
-mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/pmtbox/encredible/main/bin/encredible -o ~/bin/encredible && chmod +x ~/bin/encredible
+mkdir -p ~/bin && curl -fsSL https://raw.githubusercontent.com/mbroadhead/encredible/main/bin/encredible -o ~/bin/encredible && chmod +x ~/bin/encredible
 ```
 
 ## Usage
