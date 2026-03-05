@@ -271,7 +271,11 @@ cipher.key = key
 cipher.iv = iv
 cipher.auth_tag = auth_tag
 cipher.auth_data = ""
-plaintext = cipher.update(encrypted) + cipher.final
+begin
+  plaintext = cipher.update(encrypted) + cipher.final
+rescue OpenSSL::Cipher::CipherError
+  abort "ERROR: Decryption failed. The master key is likely incorrect or does not match the encrypted file.\\nKey source: #{ENV["RAILS_MASTER_KEY"] ? "RAILS_MASTER_KEY env var" : "${KEY_PATH}"}"
+end
 puts Marshal.load(plaintext)
 RUBY
 }
