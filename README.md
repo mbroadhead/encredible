@@ -7,14 +7,7 @@ Uses Ruby stdlib (`openssl`, `base64`) — no gems required.
 ## Install
 
 ```sh
-git clone https://github.com/pmtbox/encredible.git ~/.encredible
-ln -s ~/.encredible/bin/encredible /usr/local/bin/encredible
-```
-
-Or add the `bin/` directory to your `PATH`:
-
-```sh
-export PATH="$HOME/.encredible/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/pmtbox/encredible/main/bin/encredible -o /usr/local/bin/encredible && chmod +x /usr/local/bin/encredible
 ```
 
 ## Usage
