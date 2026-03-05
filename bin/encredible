@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.4"
+VERSION="0.1.5"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -283,7 +283,7 @@ cipher.auth_data = ""
 begin
   plaintext = cipher.update(encrypted) + cipher.final
 rescue OpenSSL::Cipher::CipherError
-  abort "ERROR: Decryption failed. The master key is likely incorrect or does not match the encrypted file.\\nKey source: #{ENV["RAILS_MASTER_KEY"] ? "RAILS_MASTER_KEY env var" : "${KEY_PATH}"}"
+  abort "ERROR: Decryption failed. The master key is likely incorrect or does not match the encrypted file.\\nKey path: ${KEY_PATH}\\nKey source: #{ENV["RAILS_MASTER_KEY"] ? "RAILS_MASTER_KEY env var" : "${KEY_PATH}"}"
 end
 puts Marshal.load(plaintext)
 RUBY
@@ -329,7 +329,7 @@ decrypt_blob_to_file() {
 
   CONTENT_PATH="$enc_blob"
   if ! run_ruby "$(ruby_decrypt)" > "$out_file" 2>"$WORK_DIR/decrypt_err.log"; then
-    echo "ERROR: Failed to decrypt $enc_blob" >&2
+    echo "ERROR: Failed to decrypt $enc_blob (key path: $KEY_PATH)" >&2
     cat "$WORK_DIR/decrypt_err.log" >&2
     CONTENT_PATH="$saved_content_path"
     exit 1
@@ -472,7 +472,7 @@ cmd_textconv() {
   if ! run_ruby "$(ruby_decrypt)" 2>"$WORK_DIR/textconv_err.log"; then
     local blob_hash
     blob_hash="$(git hash-object "$file" 2>/dev/null || echo "unknown")"
-    echo "# encredible: decryption failed for blob $blob_hash"
+    echo "# encredible: decryption failed for blob $blob_hash (key path: $KEY_PATH)"
     cat "$WORK_DIR/textconv_err.log"
   fi
   CONTENT_PATH="$saved_content_path"
