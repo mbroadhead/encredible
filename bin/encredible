@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.3"
+VERSION="0.1.4"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -418,13 +418,13 @@ cmd_mergetool() {
   # Seed merged with ours as starting point
   cp "$tmp_local" "$tmp_merged"
 
-  echo "==> Opening vimdiff. Edit the RIGHT pane (merged). Save and :qa when done."
+  echo "==> Opening vimdiff. Edit the MIDDLE pane (merged). Save and :qa when done."
   echo "    Left   = LOCAL (ours)"
-  echo "    Middle = REMOTE (theirs)"
-  echo "    Right  = MERGED (result — edit this one)"
+  echo "    Middle = MERGED (result — edit this one)"
+  echo "    Right  = REMOTE (theirs)"
   echo ""
 
-  vimdiff "$tmp_local" "$tmp_remote" "$tmp_merged"
+  vimdiff "$tmp_local" "$tmp_merged" "$tmp_remote"
 
   echo "==> Re-encrypting resolved credentials..."
   encrypt_from_file "$tmp_merged"
