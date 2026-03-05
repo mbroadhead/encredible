@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.1"
+VERSION="0.1.2"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -457,8 +457,9 @@ cmd_textconv() {
   local file="$TEXTCONV_FILE"
 
   # Try to detect environment from the file path; fall back to defaults
+  # Suppress stdout from resolve_paths_from_file so it doesn't pollute textconv output
   if [[ "$file" == *credentials*.yml.enc ]]; then
-    resolve_paths_from_file "$file" 2>/dev/null || resolve_paths
+    resolve_paths_from_file "$file" >/dev/null 2>/dev/null || resolve_paths
   else
     resolve_paths
   fi
@@ -466,7 +467,9 @@ cmd_textconv() {
 
   local saved_content_path="$CONTENT_PATH"
   CONTENT_PATH="$file"
+  # Output error to stdout so git textconv includes it in the diff
   if ! run_ruby "$(ruby_decrypt)" 2>"$WORK_DIR/textconv_err.log"; then
+    echo "# encredible: decryption failed for this version"
     cat "$WORK_DIR/textconv_err.log"
   fi
   CONTENT_PATH="$saved_content_path"
