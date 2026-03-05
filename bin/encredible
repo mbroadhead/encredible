@@ -1,0 +1,566 @@
+#!/usr/bin/env bash
+# encredible — Standalone Rails credentials tool
+#
+# Show, edit, and merge Rails encrypted credentials without booting Rails.
+# Uses Ruby stdlib (openssl, base64) — no gems required.
+#
+# USAGE:
+#   encredible --show [--env staging]
+#   encredible --edit [--env staging]
+#   encredible --merge-tool "$LOCAL" "$REMOTE" "$MERGED"
+#   encredible --diff-tool "$LOCAL" "$REMOTE" "$MERGED"
+#   encredible --textconv FILE
+#   encredible --deploy
+#   encredible --resolve
+#   encredible -h
+#
+# REQUIREMENTS:
+#   - Ruby must be available in PATH (no gems required)
+#   - The appropriate key file or RAILS_MASTER_KEY env var must be present
+
+set -euo pipefail
+
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+REPO_ROOT="$(pwd)"
+
+# ---------------------------------------------------------------------------
+# Secure temp directory — all plaintext goes here, cleaned up on exit
+# ---------------------------------------------------------------------------
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/encredible.XXXXXX")"
+chmod 700 "$WORK_DIR"
+
+cleanup() {
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+CMD=""
+ENV_NAME=""
+MERGETOOL_ARGS=()
+DIFFTOOL_ARGS=()
+TEXTCONV_FILE=""
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+usage() {
+  cat <<'HELP'
+encredible — Standalone Rails credentials tool (no Rails boot)
+
+USAGE:
+  encredible -s [-E ENV]
+  encredible -e [-E ENV]
+  encredible -m LOCAL REMOTE MERGED
+  encredible -D LOCAL REMOTE MERGED
+  encredible -t FILE
+  encredible -d
+  encredible -r
+  encredible -h
+
+OPTIONS:
+  -s, --show          Decrypt and print credentials to stdout
+  -e, --edit          Decrypt, open in $EDITOR, re-encrypt if changed
+  -m, --merge-tool    3-way vimdiff merge driver for git conflicts
+                      (auto-detects environment from the file path)
+  -D, --diff-tool     Diff driver for git: decrypts both sides and diffs them
+                      (auto-detects environment from the file path)
+  -t, --textconv      Decrypt a single .yml.enc file to stdout (for git textconv)
+  -d, --deploy        Register mergetool, difftool, and textconv in .git/config
+                      and add .gitattributes entries so git diff works automatically
+  -r, --resolve       Deploy mergetool and run git mergetool to resolve conflicts
+  -E, --env ENV       Target environment (e.g., staging). Overrides RAILS_ENV.
+  -h, --help          Show this help
+
+ENVIRONMENT VARIABLES:
+  RAILS_ENV           Selects environment when -E/--env is not given.
+                      Uses Rails cascading: tries config/credentials/{env}.yml.enc
+                      first, falls back to config/credentials.yml.enc.
+  RAILS_MASTER_KEY    Encryption key value. Takes precedence over key files.
+
+PATH RESOLUTION:
+  Environment-specific file exists → use it + matching .key file
+  Environment-specific file missing → fall back to default credentials
+
+  Examples (RAILS_ENV=staging):
+    config/credentials/staging.yml.enc exists → use it + staging.key
+    config/credentials/staging.yml.enc missing → use credentials.yml.enc + master.key
+
+REQUIREMENTS:
+  - The appropriate key file or RAILS_MASTER_KEY env var must exist
+  - Ruby must be available in PATH (no gems required)
+HELP
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -s|--show)
+      CMD="show"
+      shift
+      ;;
+    -e|--edit)
+      CMD="edit"
+      shift
+      ;;
+    -m|--merge-tool)
+      CMD="mergetool"
+      shift
+      # Collect the three positional args for merge-tool
+      while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
+        MERGETOOL_ARGS+=("$1")
+        shift
+      done
+      ;;
+    -t|--textconv)
+      CMD="textconv"
+      shift
+      TEXTCONV_FILE="${1:?--textconv requires a file path}"
+      shift
+      ;;
+    -D|--diff-tool)
+      CMD="difftool"
+      shift
+      # Collect the positional args for diff-tool (LOCAL REMOTE MERGED)
+      while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
+        DIFFTOOL_ARGS+=("$1")
+        shift
+      done
+      ;;
+    -d|--deploy)
+      CMD="deploy"
+      shift
+      ;;
+    -r|--resolve|--resolve-merge-conflicts)
+      CMD="resolve"
+      shift
+      ;;
+    -E|--env)
+      shift
+      ENV_NAME="${1:?--env requires a value}"
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      echo "Run 'encredible -h' for usage." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$CMD" ]]; then
+  echo "ERROR: No command specified. Run 'encredible -h' for usage." >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# resolve_paths: set CONTENT_PATH and KEY_PATH
+#   Priority: --env flag > RAILS_ENV > default
+#   Cascading: if env-specific .enc file doesn't exist, fall back to default
+#   (matches Rails credentials_defaults behavior)
+# ---------------------------------------------------------------------------
+resolve_paths() {
+  local env="${ENV_NAME:-${RAILS_ENV:-}}"
+
+  if [[ -n "$env" && -f "$REPO_ROOT/config/credentials/${env}.yml.enc" ]]; then
+    # Environment-specific file exists — use it
+    CONTENT_PATH="config/credentials/${env}.yml.enc"
+    if [[ -f "$REPO_ROOT/config/credentials/${env}.key" ]]; then
+      KEY_PATH="config/credentials/${env}.key"
+    else
+      KEY_PATH="config/master.key"
+    fi
+  else
+    # No env, or env-specific file doesn't exist — use default
+    CONTENT_PATH="config/credentials.yml.enc"
+    KEY_PATH="config/master.key"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# resolve_paths_from_file: derive CONTENT_PATH and KEY_PATH from a file path
+#   Handles:
+#     config/credentials.yml.enc           → master.key
+#     config/credentials/<env>.yml.enc     → config/credentials/<env>.key
+# ---------------------------------------------------------------------------
+resolve_paths_from_file() {
+  local file_path="$1"
+  local basename
+
+  # Normalize to repo-relative path
+  file_path="${file_path#"$REPO_ROOT/"}"
+
+  basename="$(basename "$file_path")"
+
+  if [[ "$basename" == "credentials.yml.enc" ]]; then
+    # Default credentials
+    CONTENT_PATH="config/credentials.yml.enc"
+    KEY_PATH="config/master.key"
+  elif [[ "$basename" =~ ^(.+)\.yml\.enc$ ]]; then
+    # Environment-specific: staging.yml.enc → staging
+    local env_name="${BASH_REMATCH[1]}"
+    CONTENT_PATH="config/credentials/${env_name}.yml.enc"
+    if [[ -f "$REPO_ROOT/config/credentials/${env_name}.key" ]]; then
+      KEY_PATH="config/credentials/${env_name}.key"
+    else
+      KEY_PATH="config/master.key"
+    fi
+  else
+    echo "ERROR: Unrecognized credentials file: $file_path" >&2
+    exit 1
+  fi
+
+  echo "==> Detected credentials: $CONTENT_PATH (key: $KEY_PATH)"
+}
+
+# ---------------------------------------------------------------------------
+# validate_key: ensure the key is available
+# ---------------------------------------------------------------------------
+validate_key() {
+  if [[ ! -f "$REPO_ROOT/$KEY_PATH" && -z "${RAILS_MASTER_KEY:-}" ]]; then
+    echo "ERROR: Key not found. Provide $REPO_ROOT/$KEY_PATH or set \$RAILS_MASTER_KEY." >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# check_ruby: ensure Ruby is available in PATH
+# ---------------------------------------------------------------------------
+check_ruby() {
+  if ! command -v ruby &>/dev/null; then
+    echo "ERROR: Ruby is required but not found in PATH." >&2
+    exit 1
+  fi
+}
+
+check_ruby
+
+# ---------------------------------------------------------------------------
+# run_ruby: execute Ruby code locally
+# ---------------------------------------------------------------------------
+run_ruby() {
+  local ruby_code="$1"
+  cd "$REPO_ROOT" && ruby -e "$ruby_code"
+}
+
+# ---------------------------------------------------------------------------
+# Ruby code templates (parameterized by CONTENT_PATH, KEY_PATH)
+# ---------------------------------------------------------------------------
+ruby_decrypt() {
+  cat <<RUBY
+require "openssl"
+require "base64"
+key_hex = ENV["RAILS_MASTER_KEY"] || File.read("${KEY_PATH}").strip
+key = [key_hex].pack("H*")
+data = File.read("${CONTENT_PATH}").strip
+parts = data.split("--")
+encrypted = Base64.strict_decode64(parts[0])
+iv = Base64.strict_decode64(parts[1])
+auth_tag = Base64.strict_decode64(parts[2])
+cipher = OpenSSL::Cipher.new("aes-128-gcm")
+cipher.decrypt
+cipher.key = key
+cipher.iv = iv
+cipher.auth_tag = auth_tag
+cipher.auth_data = ""
+plaintext = cipher.update(encrypted) + cipher.final
+puts Marshal.load(plaintext)
+RUBY
+}
+
+ruby_encrypt() {
+  local plaintext_path="$1"
+  cat <<RUBY
+require "openssl"
+require "base64"
+key_hex = ENV["RAILS_MASTER_KEY"] || File.read("${KEY_PATH}").strip
+key = [key_hex].pack("H*")
+plaintext = File.read("${plaintext_path}")
+marshaled = Marshal.dump(plaintext)
+cipher = OpenSSL::Cipher.new("aes-128-gcm")
+cipher.encrypt
+cipher.key = key
+iv = cipher.random_iv
+cipher.auth_data = ""
+encrypted = cipher.update(marshaled) + cipher.final
+auth_tag = cipher.auth_tag(16)
+result = [encrypted, iv, auth_tag].map { |p| Base64.strict_encode64(p) }.join("--")
+File.binwrite("${CONTENT_PATH}", result + "\\n")
+RUBY
+}
+
+# ---------------------------------------------------------------------------
+# decrypt_to_stdout
+# ---------------------------------------------------------------------------
+decrypt_to_stdout() {
+  run_ruby "$(ruby_decrypt)"
+}
+
+# ---------------------------------------------------------------------------
+# decrypt_blob_to_file: decrypt an arbitrary .enc blob to a plaintext file
+#   $1 = blob path (temp file from git)
+#   $2 = output plaintext path
+# ---------------------------------------------------------------------------
+decrypt_blob_to_file() {
+  local enc_blob="$1"
+  local out_file="$2"
+  local saved_content_path="$CONTENT_PATH"
+
+  CONTENT_PATH="$enc_blob"
+  if ! run_ruby "$(ruby_decrypt)" > "$out_file" 2>"$WORK_DIR/decrypt_err.log"; then
+    echo "ERROR: Failed to decrypt $enc_blob" >&2
+    cat "$WORK_DIR/decrypt_err.log" >&2
+    CONTENT_PATH="$saved_content_path"
+    exit 1
+  fi
+  CONTENT_PATH="$saved_content_path"
+}
+
+# ---------------------------------------------------------------------------
+# encrypt_from_file: re-encrypt from a plaintext file
+#   $1 = plaintext file path (absolute path)
+# ---------------------------------------------------------------------------
+encrypt_from_file() {
+  local plain_file="$1"
+  if ! run_ruby "$(ruby_encrypt "$plain_file")" 2>"$WORK_DIR/encrypt_err.log"; then
+    echo "ERROR: Failed to encrypt credentials." >&2
+    cat "$WORK_DIR/encrypt_err.log" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_show
+# ---------------------------------------------------------------------------
+cmd_show() {
+  resolve_paths
+  validate_key
+  decrypt_to_stdout
+}
+
+# ---------------------------------------------------------------------------
+# cmd_edit
+# ---------------------------------------------------------------------------
+cmd_edit() {
+  resolve_paths
+  validate_key
+
+  local editor="${EDITOR:-vim}"
+  local tmp_file="$WORK_DIR/edit.yml"
+
+  echo "==> Decrypting $CONTENT_PATH..."
+  decrypt_to_stdout > "$tmp_file"
+
+  local checksum_before
+  checksum_before="$(shasum "$tmp_file" | awk '{print $1}')"
+
+  "$editor" "$tmp_file"
+
+  local checksum_after
+  checksum_after="$(shasum "$tmp_file" | awk '{print $1}')"
+
+  if [[ "$checksum_before" = "$checksum_after" ]]; then
+    echo "==> No changes detected. Skipping re-encryption."
+  else
+    echo "==> Re-encrypting $CONTENT_PATH..."
+    encrypt_from_file "$tmp_file"
+    echo "==> Done. Credentials updated."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_mergetool
+# ---------------------------------------------------------------------------
+cmd_mergetool() {
+  if [[ ${#MERGETOOL_ARGS[@]} -ne 3 ]]; then
+    echo "ERROR: --merge-tool requires exactly 3 arguments: LOCAL REMOTE MERGED" >&2
+    exit 1
+  fi
+
+  local mt_local="${MERGETOOL_ARGS[0]}"
+  local mt_remote="${MERGETOOL_ARGS[1]}"
+  local mt_merged="${MERGETOOL_ARGS[2]}"
+
+  resolve_paths_from_file "$mt_merged"
+  validate_key
+
+  local tmp_local="$WORK_DIR/local.yml"
+  local tmp_remote="$WORK_DIR/remote.yml"
+  local tmp_merged="$WORK_DIR/merged.yml"
+
+  echo "==> Decrypting LOCAL (ours)..."
+  decrypt_blob_to_file "$mt_local" "$tmp_local"
+
+  echo "==> Decrypting REMOTE (theirs)..."
+  decrypt_blob_to_file "$mt_remote" "$tmp_remote"
+
+  # Seed merged with ours as starting point
+  cp "$tmp_local" "$tmp_merged"
+
+  echo "==> Opening vimdiff. Edit the RIGHT pane (merged). Save and :qa when done."
+  echo "    Left   = LOCAL (ours)"
+  echo "    Middle = REMOTE (theirs)"
+  echo "    Right  = MERGED (result — edit this one)"
+  echo ""
+
+  vimdiff "$tmp_local" "$tmp_remote" "$tmp_merged"
+
+  echo "==> Re-encrypting resolved credentials..."
+  encrypt_from_file "$tmp_merged"
+
+  # Copy the freshly encrypted file back to MERGED so git sees the resolution
+  local real_enc="$REPO_ROOT/$CONTENT_PATH"
+  if [[ "$(realpath "$real_enc")" != "$(realpath "$mt_merged")" ]]; then
+    cp "$real_enc" "$mt_merged"
+  fi
+
+  echo "==> Done. Conflict resolved and re-encrypted."
+
+  local orig_file="$REPO_ROOT/${CONTENT_PATH}.orig"
+  if [[ -f "$orig_file" ]]; then
+    read -rp "==> Remove ${CONTENT_PATH}.orig? [Y/n] " answer
+    if [[ "${answer:-Y}" =~ ^[Yy]$ ]]; then
+      rm -f "$orig_file"
+      echo "==> Removed ${CONTENT_PATH}.orig"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_textconv: decrypt a single file to stdout (used by git textconv)
+#   Git calls: <command> <file>
+#   For working-tree files the path is recognizable (config/credentials/...)
+#   For historical blobs git passes a temp file — fall back to default key
+# ---------------------------------------------------------------------------
+cmd_textconv() {
+  local file="$TEXTCONV_FILE"
+
+  # Try to detect environment from the file path; fall back to defaults
+  if [[ "$file" == *credentials*.yml.enc ]]; then
+    resolve_paths_from_file "$file" 2>/dev/null || resolve_paths
+  else
+    resolve_paths
+  fi
+  validate_key
+
+  local saved_content_path="$CONTENT_PATH"
+  CONTENT_PATH="$file"
+  run_ruby "$(ruby_decrypt)" || true
+  CONTENT_PATH="$saved_content_path"
+}
+
+# ---------------------------------------------------------------------------
+# cmd_difftool
+# ---------------------------------------------------------------------------
+cmd_difftool() {
+  if [[ ${#DIFFTOOL_ARGS[@]} -lt 2 ]]; then
+    echo "ERROR: --diff-tool requires at least 2 arguments: LOCAL REMOTE [MERGED]" >&2
+    exit 1
+  fi
+
+  local dt_local="${DIFFTOOL_ARGS[0]}"
+  local dt_remote="${DIFFTOOL_ARGS[1]}"
+  local dt_merged="${DIFFTOOL_ARGS[2]:-}"
+
+  # Use MERGED path (actual file) to detect environment, fall back to resolve_paths
+  if [[ -n "$dt_merged" ]]; then
+    resolve_paths_from_file "$dt_merged"
+  else
+    resolve_paths
+  fi
+  validate_key
+
+  local tmp_local="$WORK_DIR/old.yml"
+  local tmp_remote="$WORK_DIR/new.yml"
+
+  decrypt_blob_to_file "$dt_local" "$tmp_local"
+  decrypt_blob_to_file "$dt_remote" "$tmp_remote"
+
+  # Use diff with color; exit 0 even if files differ (exit 1 from diff is normal)
+  diff -u --label "a/$CONTENT_PATH" --label "b/$CONTENT_PATH" \
+    "$tmp_local" "$tmp_remote" || true
+}
+
+# ---------------------------------------------------------------------------
+# cmd_deploy
+# ---------------------------------------------------------------------------
+cmd_deploy() {
+  local rel_path="$SCRIPT_PATH"
+  local git_dir
+  git_dir="$(git rev-parse --git-dir)"
+
+  # Mergetool
+  git config mergetool.encredible.cmd \
+    "${rel_path} --merge-tool \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+  git config mergetool.encredible.trustExitCode true
+
+  # Difftool (explicit: git difftool --tool=encredible)
+  git config difftool.encredible.cmd \
+    "${rel_path} --diff-tool \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
+
+  # Textconv (automatic: plain git diff decrypts .yml.enc files)
+  git config diff.encredible.textconv \
+    "${rel_path} --textconv"
+  git config diff.encredible.cachetextconv true
+
+  # Add .gitattributes entries if not already present
+  local gitattributes="$REPO_ROOT/.gitattributes"
+  local patterns=(
+    "config/credentials.yml.enc"
+    "config/credentials/*.yml.enc"
+  )
+  local changed=false
+  for pattern in "${patterns[@]}"; do
+    if ! grep -qF "${pattern} diff=encredible" "$gitattributes" 2>/dev/null; then
+      echo "${pattern} diff=encredible" >> "$gitattributes"
+      changed=true
+    fi
+  done
+
+  echo "Installed into ${git_dir}/config:"
+  echo "  - mergetool 'encredible'"
+  echo "  - difftool 'encredible'"
+  echo "  - textconv 'encredible' (cached)"
+  if [[ "$changed" = true ]]; then
+    echo ""
+    echo "Added .gitattributes entries for automatic git diff decryption."
+    echo "Commit .gitattributes to share with your team."
+  fi
+  echo ""
+  echo "Usage:"
+  echo "  git diff                                       # .yml.enc diffs are automatic"
+  echo "  git log -p -- config/credentials.yml.enc       # history with decrypted diffs"
+  echo "  git mergetool --tool=encredible                 # resolve .yml.enc conflicts"
+  echo "  git difftool --tool=encredible                  # side-by-side diff"
+}
+
+# ---------------------------------------------------------------------------
+# cmd_resolve: deploy mergetool config, then run it
+# ---------------------------------------------------------------------------
+cmd_resolve() {
+  cmd_deploy
+  echo ""
+  echo "==> Running git mergetool --tool=encredible..."
+  git mergetool --tool=encredible
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+case "$CMD" in
+  show)      cmd_show ;;
+  edit)      cmd_edit ;;
+  mergetool) cmd_mergetool ;;
+  textconv)  cmd_textconv ;;
+  difftool)  cmd_difftool ;;
+  deploy)    cmd_deploy ;;
+  resolve)   cmd_resolve ;;
+esac
