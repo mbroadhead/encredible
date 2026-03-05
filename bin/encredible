@@ -12,6 +12,7 @@
 #   encredible --textconv FILE
 #   encredible --deploy
 #   encredible --resolve
+#   encredible -v
 #   encredible -h
 #
 # REQUIREMENTS:
@@ -19,6 +20,8 @@
 #   - The appropriate key file or RAILS_MASTER_KEY env var must be present
 
 set -euo pipefail
+
+VERSION="0.1.0"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -58,6 +61,7 @@ USAGE:
   encredible -t FILE
   encredible -d
   encredible -r
+  encredible -v
   encredible -h
 
 OPTIONS:
@@ -72,6 +76,7 @@ OPTIONS:
                       and add .gitattributes entries so git diff works automatically
   -r, --resolve       Deploy mergetool and run git mergetool to resolve conflicts
   -E, --env ENV       Target environment (e.g., staging). Overrides RAILS_ENV.
+  -v, --version       Print version and exit
   -h, --help          Show this help
 
 ENVIRONMENT VARIABLES:
@@ -99,6 +104,10 @@ HELP
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -v|--version)
+      echo "encredible $VERSION"
+      exit 0
+      ;;
     -h|--help)
       usage
       exit 0

@@ -6,6 +6,18 @@ load test_helper/common
 # Help / usage
 # -----------------------------------------------------------------------
 
+@test "--version prints version" {
+  run "$ENCREDIBLE" --version
+  assert_success
+  assert_output --regexp '^encredible [0-9]+\.[0-9]+\.[0-9]+'
+}
+
+@test "-v prints version" {
+  run "$ENCREDIBLE" -v
+  assert_success
+  assert_output --regexp '^encredible [0-9]+\.[0-9]+\.[0-9]+'
+}
+
 @test "-h prints help and exits 0" {
   run "$ENCREDIBLE" -h
   assert_success
