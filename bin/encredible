@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.6"
+VERSION="0.1.7"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -42,6 +42,8 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 CMD=""
 ENV_NAME=""
+CONTENT_PATH=""
+KEY_PATH=""
 MERGETOOL_ARGS=()
 DIFFTOOL_ARGS=()
 TEXTCONV_FILE=""
