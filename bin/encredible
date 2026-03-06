@@ -10,7 +10,7 @@
 #   encredible --merge-tool "$LOCAL" "$REMOTE" "$MERGED"
 #   encredible --diff-tool "$LOCAL" "$REMOTE" "$MERGED"
 #   encredible --textconv FILE
-#   encredible --deploy
+#   encredible --deploy [--global]
 #   encredible --resolve
 #   encredible -v
 #   encredible -h
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.9"
+VERSION="0.2.0"
 
 SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 REPO_ROOT="$(pwd)"
@@ -61,7 +61,7 @@ USAGE:
   encredible -m LOCAL REMOTE MERGED
   encredible -D LOCAL REMOTE MERGED
   encredible -t FILE
-  encredible -d
+  encredible -d [--global]
   encredible -r
   encredible -v
   encredible -h
@@ -76,6 +76,8 @@ OPTIONS:
   -t, --textconv      Decrypt a single .yml.enc file to stdout (for git textconv)
   -d, --deploy        Register mergetool, difftool, and textconv in .git/config
                       and add .gitattributes entries so git diff works automatically
+      --global        With --deploy: install to global git config and attributes
+                      instead of the current repo
   -r, --resolve       Deploy mergetool and run git mergetool to resolve conflicts
   -E, --env ENV       Target environment (e.g., staging). Overrides RAILS_ENV.
   -v, --version       Print version and exit
@@ -148,6 +150,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d|--deploy)
       CMD="deploy"
+      shift
+      ;;
+    --global)
+      GLOBAL=true
       shift
       ;;
     -r|--resolve|--resolve-merge-conflicts)
@@ -598,25 +604,40 @@ cmd_difftool() {
 # ---------------------------------------------------------------------------
 cmd_deploy() {
   local rel_path="$SCRIPT_PATH"
-  local git_dir
-  git_dir="$(git rev-parse --git-dir)"
+  local config_label
+  local git_cfg="git config"
+
+  if [[ "${GLOBAL:-}" = true ]]; then
+    git_cfg="git config --global"
+    config_label="global git config"
+  else
+    config_label="$(git rev-parse --git-dir)/config"
+  fi
 
   # Mergetool
-  git config mergetool.encredible.cmd \
+  $git_cfg mergetool.encredible.cmd \
     "${rel_path} --merge-tool \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
-  git config mergetool.encredible.trustExitCode true
+  $git_cfg mergetool.encredible.trustExitCode true
 
   # Difftool (explicit: git difftool --tool=encredible)
-  git config difftool.encredible.cmd \
+  $git_cfg difftool.encredible.cmd \
     "${rel_path} --diff-tool \"\$LOCAL\" \"\$REMOTE\" \"\$MERGED\""
 
   # Textconv (automatic: plain git diff decrypts .yml.enc files)
-  git config diff.encredible.textconv \
+  $git_cfg diff.encredible.textconv \
     "${rel_path} --textconv"
-  git config diff.encredible.cachetextconv true
+  $git_cfg diff.encredible.cachetextconv true
 
-  # Add .gitattributes entries if not already present
-  local gitattributes="$REPO_ROOT/.gitattributes"
+  # Add gitattributes entries if not already present
+  local gitattributes
+  if [[ "${GLOBAL:-}" = true ]]; then
+    # Use XDG path, falling back to ~/.config/git/attributes
+    gitattributes="${XDG_CONFIG_HOME:-$HOME/.config}/git/attributes"
+    mkdir -p "$(dirname "$gitattributes")"
+  else
+    gitattributes="$REPO_ROOT/.gitattributes"
+  fi
+
   local patterns=(
     "config/credentials.yml.enc"
     "config/credentials/*.yml.enc"
@@ -629,14 +650,19 @@ cmd_deploy() {
     fi
   done
 
-  echo "Installed into ${git_dir}/config:"
+  echo "Installed into ${config_label}:"
   echo "  - mergetool 'encredible'"
   echo "  - difftool 'encredible'"
   echo "  - textconv 'encredible' (cached)"
   if [[ "$changed" = true ]]; then
     echo ""
-    echo "Added .gitattributes entries for automatic git diff decryption."
-    echo "Commit .gitattributes to share with your team."
+    if [[ "${GLOBAL:-}" = true ]]; then
+      echo "Added entries to ${gitattributes} for automatic git diff decryption."
+      echo "This applies to all repos — no per-repo .gitattributes needed."
+    else
+      echo "Added .gitattributes entries for automatic git diff decryption."
+      echo "Commit .gitattributes to share with your team."
+    fi
   fi
   echo ""
   echo "Usage:"
