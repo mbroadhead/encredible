@@ -151,6 +151,22 @@ load test_helper/common
   assert_output --partial "--textconv requires a file path"
 }
 
+@test "--textconv on an unrecognizable blob with no keys degrades gracefully" {
+  # Simulates git passing a historical blob as a temp file (name does not match
+  # *credentials*.yml.enc) in a context where no key is available — the
+  # "encredible is configured but cannot decrypt" case. It must NOT crash; it
+  # must print a failure comment and exit 0 so `git diff` doesn't abort.
+  local dir
+  dir="$(mktemp -d "$BATS_TEST_TMPDIR/nokeys.XXXXXX")"
+  cd "$dir"
+  printf 'some encrypted-looking bytes\n' > blob.tmp
+
+  run env -u RAILS_MASTER_KEY "$ENCREDIBLE" --textconv blob.tmp
+  assert_success
+  refute_output --partial "unbound variable"
+  assert_output --partial "decryption failed"
+}
+
 # -----------------------------------------------------------------------
 # Deploy
 # -----------------------------------------------------------------------

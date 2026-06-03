@@ -495,14 +495,18 @@ decrypt_with_any_key() {
     [[ -f "$kf" ]] && key_paths+=("${kf#"$REPO_ROOT/"}")
   done
 
-  for kp in "${key_paths[@]}"; do
-    KEY_PATH="$kp"
-    if run_ruby "$(ruby_decrypt)" 2>/dev/null; then
-      CONTENT_PATH="$saved_content_path"
-      KEY_PATH="$saved_key_path"
-      return 0
-    fi
-  done
+  # Guard the expansion: under `set -u`, bash 3.2 (macOS default) errors on
+  # "${key_paths[@]}" when the array is empty. No keys → fall through to failure.
+  if (( ${#key_paths[@]} > 0 )); then
+    for kp in "${key_paths[@]}"; do
+      KEY_PATH="$kp"
+      if run_ruby "$(ruby_decrypt)" 2>/dev/null; then
+        CONTENT_PATH="$saved_content_path"
+        KEY_PATH="$saved_key_path"
+        return 0
+      fi
+    done
+  fi
 
   CONTENT_PATH="$saved_content_path"
   KEY_PATH="$saved_key_path"
