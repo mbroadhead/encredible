@@ -635,8 +635,15 @@ cmd_deploy() {
   # Add gitattributes entries if not already present
   local gitattributes
   if [[ "${GLOBAL:-}" = true ]]; then
-    # Use XDG path, falling back to ~/.config/git/attributes
-    gitattributes="${XDG_CONFIG_HOME:-$HOME/.config}/git/attributes"
+    # Honor an existing core.attributesFile — that's the file git actually reads.
+    # Only when it's unset does git fall back to ~/.config/git/attributes, so
+    # writing to the XDG path unconditionally would be silently ignored.
+    gitattributes="$(git config --global core.attributesFile 2>/dev/null || true)"
+    if [[ -n "$gitattributes" ]]; then
+      gitattributes="${gitattributes/#\~/$HOME}"  # expand leading ~ as git does
+    else
+      gitattributes="${XDG_CONFIG_HOME:-$HOME/.config}/git/attributes"
+    fi
     mkdir -p "$(dirname "$gitattributes")"
   else
     gitattributes="$REPO_ROOT/.gitattributes"

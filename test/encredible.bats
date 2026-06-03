@@ -229,6 +229,46 @@ load test_helper/common
   assert_output --partial "mergetool 'encredible'"
 }
 
+@test "--deploy --global writes attributes to core.attributesFile when set" {
+  setup_rails_project
+  cd "$RAILS_PROJECT"
+
+  # Sandbox the global config so we never touch the real ~/.gitconfig
+  local home
+  home="$(mktemp -d "$BATS_TEST_TMPDIR/home.XXXXXX")"
+
+  # User has a custom global attributes file (referenced with a leading ~)
+  env HOME="$home" GIT_CONFIG_GLOBAL="$home/.gitconfig" \
+    git config --global core.attributesFile "~/custom_attributes"
+
+  run env -u XDG_CONFIG_HOME HOME="$home" GIT_CONFIG_GLOBAL="$home/.gitconfig" \
+    "$ENCREDIBLE" --deploy --global
+  assert_success
+
+  # Patterns must land in the configured file (with ~ expanded), NOT the XDG default
+  assert_file_exist "$home/custom_attributes"
+  run cat "$home/custom_attributes"
+  assert_output --partial "config/credentials.yml.enc diff=encredible"
+
+  assert_file_not_exist "$home/.config/git/attributes"
+}
+
+@test "--deploy --global falls back to XDG attributes when core.attributesFile unset" {
+  setup_rails_project
+  cd "$RAILS_PROJECT"
+
+  local home
+  home="$(mktemp -d "$BATS_TEST_TMPDIR/home.XXXXXX")"
+
+  run env -u XDG_CONFIG_HOME HOME="$home" GIT_CONFIG_GLOBAL="$home/.gitconfig" \
+    "$ENCREDIBLE" --deploy --global
+  assert_success
+
+  assert_file_exist "$home/.config/git/attributes"
+  run cat "$home/.config/git/attributes"
+  assert_output --partial "config/credentials.yml.enc diff=encredible"
+}
+
 # -----------------------------------------------------------------------
 # Diff tool
 # -----------------------------------------------------------------------
